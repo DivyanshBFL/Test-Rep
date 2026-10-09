@@ -12,56 +12,69 @@ jobs:
       - name: Fetch and Mirror Issues
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          SOURCE_REPO: "Snapporg/mobile-app"
           TARGET_REPO: ${{ github.repository }}
         run: |
-          echo "Connecting to $SOURCE_REPO..."
+          # The 3 client repositories
+          CLIENT_REPOS=(
+            "Snapporg/frontend"
+            "Snapporg/mobile-app"
+            "Snapporg/wheelhouse-mobile"
+          )
 
-          # Fetch open issues with number, title, body, author, and createdAt
-          CLIENT_ISSUES=$(gh issue list --repo "$SOURCE_REPO" --state open --limit 100 --json number,title,body,author,createdAt)
-
-          if [ -z "$CLIENT_ISSUES" ] || [ "$CLIENT_ISSUES" = "[]" ]; then
-            echo "No open issues found in $SOURCE_REPO."
-            exit 0
-          fi
-
-          # Collect existing bodies to check duplicates
+          # Fetch all existing issue bodies in your personal repo to check duplicates
           EXISTING_BODIES=$(gh issue list --repo "$TARGET_REPO" --state all --limit 500 --json body --jq '.[].body' 2>/dev/null || true)
 
-          echo "$CLIENT_ISSUES" | jq -c '.[]' | while read -r issue; do
-            CLIENT_NUM=$(echo "$issue" | jq -r '.number')
-            CLIENT_TITLE=$(echo "$issue" | jq -r '.title')
-            CLIENT_AUTHOR=$(echo "$issue" | jq -r '.author.login // "Unknown"')
-            CLIENT_CREATED=$(echo "$issue" | jq -r '.createdAt // empty')
+          # Iterate through each client repository
+          for SOURCE_REPO in "${CLIENT_REPOS[@]}"; do
+            echo "Checking $SOURCE_REPO for open issues..."
 
-            if [ -z "$CLIENT_CREATED" ]; then
-              CLIENT_CREATED=$(echo "$issue" | jq -r '.created_at // "Unknown"')
+            # Fetch only active/open issues
+            CLIENT_ISSUES=$(gh issue list --repo "$SOURCE_REPO" --state open --limit 100 --json number,title,body,author,createdAt 2>/dev/null || echo "[]")
+
+            if [ -z "$CLIENT_ISSUES" ] || [ "$CLIENT_ISSUES" = "[]" ]; then
+              echo "No open issues found in $SOURCE_REPO."
+              continue
             fi
 
-            DEDUP_TAG="OrigNumber: ${CLIENT_NUM}"
+            REPO_NAME=$(basename "$SOURCE_REPO")
 
-            if echo "$EXISTING_BODIES" | grep -Fq "$DEDUP_TAG"; then
-              echo "Client issue #$CLIENT_NUM already mirrored. Skipping."
-            else
-              echo "Mirroring client issue #$CLIENT_NUM: $CLIENT_TITLE"
+            echo "$CLIENT_ISSUES" | jq -c '.[]' | while read -r issue; do
+              CLIENT_NUM=$(echo "$issue" | jq -r '.number')
+              CLIENT_TITLE=$(echo "$issue" | jq -r '.title')
+              CLIENT_AUTHOR=$(echo "$issue" | jq -r '.author.login // "Unknown"')
+              CLIENT_CREATED=$(echo "$issue" | jq -r '.createdAt // empty')
 
-              # Write metadata block cleanly without heredoc/YAML syntax conflicts
-              echo "---CLIENT_META---" > /tmp/issue_meta.txt
-              echo "OrigNumber: ${CLIENT_NUM}" >> /tmp/issue_meta.txt
-              echo "OrigAuthor: ${CLIENT_AUTHOR}" >> /tmp/issue_meta.txt
-              echo "OrigCreatedAt: ${CLIENT_CREATED}" >> /tmp/issue_meta.txt
-              echo "---END_CLIENT_META---" >> /tmp/issue_meta.txt
-              echo "" >> /tmp/issue_meta.txt
+              if [ -z "$CLIENT_CREATED" ]; then
+                CLIENT_CREATED=$(echo "$issue" | jq -r '.created_at // "Unknown"')
+              fi
 
-              # Append original description
-              echo "$issue" | jq -r '.body // "No description provided."' >> /tmp/issue_meta.txt
+              # Composite deduplication tag distinguishing same issue numbers across different repos
+              DEDUP_TAG="OrigRepo: ${REPO_NAME} | OrigNumber: ${CLIENT_NUM}"
 
-              # Create the mirrored issue with clean title
-              gh issue create \
-                --repo "$TARGET_REPO" \
-                --title "$CLIENT_TITLE" \
-                --body-file /tmp/issue_meta.txt
+              if echo "$EXISTING_BODIES" | grep -Fq "$DEDUP_TAG"; then
+                echo "Issue [$REPO_NAME #$CLIENT_NUM] already mirrored. Skipping."
+              else
+                echo "Mirroring [$REPO_NAME #$CLIENT_NUM]: $CLIENT_TITLE"
 
-              rm -f /tmp/issue_meta.txt
-            fi
+                # Write metadata cleanly to a temporary file
+                echo "---CLIENT_META---" > /tmp/issue_meta.txt
+                echo "OrigRepo: ${REPO_NAME}" >> /tmp/issue_meta.txt
+                echo "OrigNumber: ${CLIENT_NUM}" >> /tmp/issue_meta.txt
+                echo "OrigAuthor: ${CLIENT_AUTHOR}" >> /tmp/issue_meta.txt
+                echo "OrigCreatedAt: ${CLIENT_CREATED}" >> /tmp/issue_meta.txt
+                echo "---END_CLIENT_META---" >> /tmp/issue_meta.txt
+                echo "" >> /tmp/issue_meta.txt
+
+                # Append raw issue description
+                echo "$issue" | jq -r '.body // "No description provided."' >> /tmp/issue_meta.txt
+
+                # Create the mirrored issue with a clean title in your personal repo
+                gh issue create \
+                  --repo "$TARGET_REPO" \
+                  --title "$CLIENT_TITLE" \
+                  --body-file /tmp/issue_meta.txt
+
+                rm -f /tmp/issue_meta.txt
+              fi
+            done
           done
