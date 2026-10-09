@@ -5,6 +5,11 @@ on:
     - cron: '7,17,27,37,47,57 * * * *'
   workflow_dispatch:
 
+# Prevent overlapping runs of this workflow in the same repository.
+concurrency:
+  group: mirror-client-issues-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -22,14 +27,14 @@ jobs:
             "Snapporg/wheelhouse-mobile"
           )
 
-          # Fetch existing issues from the target repository.
-          # Check issue bodies directly instead of relying on search indexing.
-          EXISTING_BODIES=$(gh issue list \
-            --repo "$TARGET_REPO" \
-            --state all \
-            --limit 1000 \
-            --json body \
-            --jq '.[].body')
+          # Fetch ALL existing issues, including closed issues.
+          # Pagination prevents missing older mirrored issues.
+          EXISTING_ISSUES=$(gh api --paginate \
+            "repos/${TARGET_REPO}/issues?state=all&per_page=100" |
+            jq -s 'add | map(
+              select(has("pull_request") | not) |
+              {number, title, body}
+            )')
 
           for SOURCE_REPO in "${CLIENT_REPOS[@]}"; do
             echo "Scanning $SOURCE_REPO..."
@@ -58,18 +63,41 @@ jobs:
               CLIENT_CREATED=$(echo "$issue" | jq -r '.createdAt // "Unknown"')
               CLIENT_STATE=$(echo "$issue" | jq -r '.state // "OPEN"')
 
-              CLIENT_LABELS=$(echo "$issue" | jq -r '[.labels[].name] | join(", ")')
+              CLIENT_LABELS=$(echo "$issue" |
+                jq -r '[.labels[].name] | join(", ")')
+
               if [ -z "$CLIENT_LABELS" ]; then
                 CLIENT_LABELS="None"
               fi
 
-              # Stable unique marker for each source issue.
               DEDUP_TOKEN="DEDUP_${REPO_NAME}_${CLIENT_NUM}"
 
-              # Match the complete marker line in existing issue bodies.
-              if printf '%s\n' "$EXISTING_BODIES" |
-                grep -Fqx "Token: ${DEDUP_TOKEN}"; then
-                echo "Issue [$REPO_NAME #$CLIENT_NUM] is already mirrored. Skipping."
+              # Detect both new markers and legacy metadata.
+              # Exact line matching avoids matching another issue number.
+              MATCH_COUNT=$(echo "$EXISTING_ISSUES" |
+                jq --arg token "$DEDUP_TOKEN" \
+                   --arg repo "$REPO_NAME" \
+                   --arg num "$CLIENT_NUM" '
+                  [
+                    .[] |
+                    select(
+                      (.body // "") |
+                      split("\n") as $lines |
+                      (
+                        ($lines | any(. == ("Token: " + $token)))
+                        or
+                        (
+                          ($lines | any(. == ("OrigRepo: " + $repo)))
+                          and
+                          ($lines | any(. == ("OrigNumber: " + $num)))
+                        )
+                      )
+                    )
+                  ] | length
+                ')
+
+              if [ "$MATCH_COUNT" -gt 0 ]; then
+                echo "Already mirrored: $REPO_NAME #$CLIENT_NUM. Skipping."
                 continue
               fi
 
@@ -93,17 +121,21 @@ jobs:
               echo "$issue" |
                 jq -r '.body // "No description provided."' >> "$TEMP_FILE"
 
-              # Add the marker to the in-memory list only after successful creation.
               if gh issue create \
                 --repo "$TARGET_REPO" \
                 --title "$CLIENT_TITLE" \
                 --body-file "$TEMP_FILE"; then
 
-                EXISTING_BODIES="${EXISTING_BODIES}"$'\n'"Token: ${DEDUP_TOKEN}"
-                echo "Successfully mirrored [$REPO_NAME #$CLIENT_NUM]."
+                # Update the local list immediately after successful creation.
+                # This also prevents duplicate processing within this run.
+                EXISTING_ISSUES=$(echo "$EXISTING_ISSUES" |
+                  jq --arg body "$(cat "$TEMP_FILE")" \
+                    '. + [{"number": null, "title": null, "body": $body}]')
+
+                echo "Successfully mirrored $REPO_NAME #$CLIENT_NUM."
               else
-                echo "ERROR: Failed to mirror [$REPO_NAME #$CLIENT_NUM]." >&2
                 rm -f "$TEMP_FILE"
+                echo "ERROR: Failed to mirror $REPO_NAME #$CLIENT_NUM." >&2
                 exit 1
               fi
 
