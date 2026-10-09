@@ -2,7 +2,7 @@ name: Mirror Issues from Client Repo
 
 on:
   schedule:
-    - cron: '13,28,43,58 * * * *'
+    - cron:  '41 17 * * *'
   workflow_dispatch:
 
 # Prevent overlapping runs of this workflow in the same repository.
