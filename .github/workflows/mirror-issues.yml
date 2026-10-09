@@ -2,7 +2,8 @@ name: Mirror Issues from Client Repo
 
 on:
   schedule:
-    - cron: '3,13,23,33,43,53 * * * *'
+    # Runs every 10 minutes at off-peak minute marks to avoid GitHub queue congestion
+    - cron: '7,17,27,37,47,57 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -26,7 +27,7 @@ jobs:
           for SOURCE_REPO in "${CLIENT_REPOS[@]}"; do
             echo "Scanning $SOURCE_REPO..."
 
-            # Limit to the 2 most recent open issues for testing
+            # Limit to 2 most recent open issues for testing (switch to 100 for production)
             CLIENT_ISSUES=$(gh issue list --repo "$SOURCE_REPO" --state open --limit 2 --json number,title,body,author,createdAt,labels,state 2>/dev/null || echo "[]")
 
             if [ -z "$CLIENT_ISSUES" ] || [ "$CLIENT_ISSUES" = "[]" ]; then
@@ -43,7 +44,6 @@ jobs:
               CLIENT_CREATED=$(echo "$issue" | jq -r '.createdAt // empty')
               CLIENT_STATE=$(echo "$issue" | jq -r '.state // "OPEN"')
 
-              # Extract all labels as comma-separated values (e.g. "Android, iOS")
               CLIENT_LABELS=$(echo "$issue" | jq -r '[.labels[].name] | join(", ")')
               if [ -z "$CLIENT_LABELS" ]; then
                 CLIENT_LABELS="None"
@@ -53,15 +53,17 @@ jobs:
                 CLIENT_CREATED=$(echo "$issue" | jq -r '.created_at // "Unknown"')
               fi
 
-              DEDUP_TAG="OrigRepo: ${REPO_NAME} | OrigNumber: ${CLIENT_NUM}"
+              # Single-line dedup key matches exactly what is written into the body
+              DEDUP_TAG="DEDUP_KEY: [${REPO_NAME}#${CLIENT_NUM}]"
 
               if echo "$EXISTING_BODIES" | grep -Fq "$DEDUP_TAG"; then
                 echo "Issue [$REPO_NAME #$CLIENT_NUM] already mirrored. Skipping."
               else
                 echo "Mirroring [$REPO_NAME #$CLIENT_NUM]: $CLIENT_TITLE"
 
-                # Write metadata cleanly to a temporary file
+                # Write metadata cleanly including the exact DEDUP_TAG
                 echo "---CLIENT_META---" > /tmp/issue_meta.txt
+                echo "${DEDUP_TAG}" >> /tmp/issue_meta.txt
                 echo "OrigRepo: ${REPO_NAME}" >> /tmp/issue_meta.txt
                 echo "OrigNumber: ${CLIENT_NUM}" >> /tmp/issue_meta.txt
                 echo "OrigAuthor: ${CLIENT_AUTHOR}" >> /tmp/issue_meta.txt
@@ -79,6 +81,9 @@ jobs:
                   --repo "$TARGET_REPO" \
                   --title "$CLIENT_TITLE" \
                   --body-file /tmp/issue_meta.txt
+
+                # Update local memory cache immediately for this run
+                EXISTING_BODIES="${EXISTING_BODIES} ${DEDUP_TAG}"
 
                 rm -f /tmp/issue_meta.txt
               fi
