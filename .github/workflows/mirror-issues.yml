@@ -2,9 +2,7 @@ name: Mirror Issues from Client Repo
 
 on:
   schedule:
-    # Runs every 15 minutes automatically in GitHub Cloud
     - cron: '*/15 * * * *'
-  # Allows manual triggering anytime via the "Run workflow" button
   workflow_dispatch:
 
 jobs:
@@ -19,33 +17,51 @@ jobs:
         run: |
           echo "Connecting to $SOURCE_REPO..."
 
-          # Fetch up to 100 open issues from the client repository
-          CLIENT_ISSUES=$(gh issue list --repo "$SOURCE_REPO" --state open --limit 100 --json number,title,body)
+          # Fetch open issues with number, title, body, author, and createdAt
+          CLIENT_ISSUES=$(gh issue list --repo "$SOURCE_REPO" --state open --limit 100 --json number,title,body,author,createdAt)
 
-          # Check if any issues exist
           if [ -z "$CLIENT_ISSUES" ] || [ "$CLIENT_ISSUES" = "[]" ]; then
             echo "No open issues found in $SOURCE_REPO."
             exit 0
           fi
 
-          # Read issue titles already present in your target repo (up to 500) to prevent duplicates
-          EXISTING_TITLES=$(gh issue list --repo "$TARGET_REPO" --state all --limit 500 --json title --jq '.[].title')
+          # Collect existing bodies to check duplicates
+          EXISTING_BODIES=$(gh issue list --repo "$TARGET_REPO" --state all --limit 500 --json body --jq '.[].body' 2>/dev/null || true)
 
-          # Iterate through each client issue and mirror if not already added
           echo "$CLIENT_ISSUES" | jq -c '.[]' | while read -r issue; do
             CLIENT_NUM=$(echo "$issue" | jq -r '.number')
             CLIENT_TITLE=$(echo "$issue" | jq -r '.title')
-            CLIENT_BODY=$(echo "$issue" | jq -r '.body // "No description provided."')
+            CLIENT_AUTHOR=$(echo "$issue" | jq -r '.author.login // "Unknown"')
+            CLIENT_CREATED=$(echo "$issue" | jq -r '.createdAt // empty')
 
-            FORMATTED_TITLE="[#${CLIENT_NUM}] ${CLIENT_TITLE}"
+            if [ -z "$CLIENT_CREATED" ]; then
+              CLIENT_CREATED=$(echo "$issue" | jq -r '.created_at // "Unknown"')
+            fi
 
-            if echo "$EXISTING_TITLES" | grep -Fxq "$FORMATTED_TITLE"; then
-              echo "Issue '$FORMATTED_TITLE' already exists in target repository. Skipping."
+            DEDUP_TAG="OrigNumber: ${CLIENT_NUM}"
+
+            if echo "$EXISTING_BODIES" | grep -Fq "$DEDUP_TAG"; then
+              echo "Client issue #$CLIENT_NUM already mirrored. Skipping."
             else
-              echo "Creating new issue: $FORMATTED_TITLE"
+              echo "Mirroring client issue #$CLIENT_NUM: $CLIENT_TITLE"
+
+              # Write metadata block cleanly without heredoc/YAML syntax conflicts
+              echo "---CLIENT_META---" > /tmp/issue_meta.txt
+              echo "OrigNumber: ${CLIENT_NUM}" >> /tmp/issue_meta.txt
+              echo "OrigAuthor: ${CLIENT_AUTHOR}" >> /tmp/issue_meta.txt
+              echo "OrigCreatedAt: ${CLIENT_CREATED}" >> /tmp/issue_meta.txt
+              echo "---END_CLIENT_META---" >> /tmp/issue_meta.txt
+              echo "" >> /tmp/issue_meta.txt
+
+              # Append original description
+              echo "$issue" | jq -r '.body // "No description provided."' >> /tmp/issue_meta.txt
+
+              # Create the mirrored issue with clean title
               gh issue create \
                 --repo "$TARGET_REPO" \
-                --title "$FORMATTED_TITLE" \
-                --body "$CLIENT_BODY"
+                --title "$CLIENT_TITLE" \
+                --body-file /tmp/issue_meta.txt
+
+              rm -f /tmp/issue_meta.txt
             fi
           done
