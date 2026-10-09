@@ -3,8 +3,8 @@ name: Mirror Issues from Client Repo
 on:
   schedule:
     # Runs every 15 minutes automatically in GitHub Cloud
-    - cron: '*/10 * * * *'
-  # Allows manual triggering for immediate testing
+    - cron: '*/15 * * * *'
+  # Allows manual triggering anytime via the "Run workflow" button
   workflow_dispatch:
 
 jobs:
@@ -18,30 +18,31 @@ jobs:
           TARGET_REPO: ${{ github.repository }}
         run: |
           echo "Connecting to $SOURCE_REPO..."
-          
-          # TEST CONFIGURATION: fetches 1 issue regardless of state (open or closed)
-          CLIENT_ISSUES=$(gh issue list --repo "$SOURCE_REPO" --state all --limit 1 --json number,title,body)
-          
+
+          # Fetch up to 100 open issues from the client repository
+          CLIENT_ISSUES=$(gh issue list --repo "$SOURCE_REPO" --state open --limit 100 --json number,title,body)
+
+          # Check if any issues exist
           if [ -z "$CLIENT_ISSUES" ] || [ "$CLIENT_ISSUES" = "[]" ]; then
-            echo "No issues found in $SOURCE_REPO."
+            echo "No open issues found in $SOURCE_REPO."
             exit 0
           fi
-          
-          # Fetch existing issue titles from your personal repo to avoid duplicates
-          EXISTING_TITLES=$(gh issue list --repo "$TARGET_REPO" --state all --limit 100 --json title --jq '.[].title')
-          
-          # Process the issue
+
+          # Read issue titles already present in your target repo (up to 500) to prevent duplicates
+          EXISTING_TITLES=$(gh issue list --repo "$TARGET_REPO" --state all --limit 500 --json title --jq '.[].title')
+
+          # Iterate through each client issue and mirror if not already added
           echo "$CLIENT_ISSUES" | jq -c '.[]' | while read -r issue; do
             CLIENT_NUM=$(echo "$issue" | jq -r '.number')
             CLIENT_TITLE=$(echo "$issue" | jq -r '.title')
             CLIENT_BODY=$(echo "$issue" | jq -r '.body // "No description provided."')
-            
+
             FORMATTED_TITLE="[#${CLIENT_NUM}] ${CLIENT_TITLE}"
-            
+
             if echo "$EXISTING_TITLES" | grep -Fxq "$FORMATTED_TITLE"; then
               echo "Issue '$FORMATTED_TITLE' already exists in target repository. Skipping."
             else
-              echo "Creating test issue: $FORMATTED_TITLE"
+              echo "Creating new issue: $FORMATTED_TITLE"
               gh issue create \
                 --repo "$TARGET_REPO" \
                 --title "$FORMATTED_TITLE" \
