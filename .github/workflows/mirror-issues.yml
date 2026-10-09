@@ -2,7 +2,7 @@ name: Mirror Issues from Client Repo
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -14,25 +14,23 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           TARGET_REPO: ${{ github.repository }}
         run: |
-          # The 3 client repositories
           CLIENT_REPOS=(
             "Snapporg/frontend"
             "Snapporg/mobile-app"
             "Snapporg/wheelhouse-mobile"
           )
 
-          # Fetch all existing issue bodies in your personal repo to check duplicates
+          # Fetch all existing issue bodies to prevent duplicates
           EXISTING_BODIES=$(gh issue list --repo "$TARGET_REPO" --state all --limit 500 --json body --jq '.[].body' 2>/dev/null || true)
 
-          # Iterate through each client repository
           for SOURCE_REPO in "${CLIENT_REPOS[@]}"; do
-            echo "Checking $SOURCE_REPO for open issues..."
+            echo "Scanning $SOURCE_REPO..."
 
-            # Fetch only active/open issues
-            CLIENT_ISSUES=$(gh issue list --repo "$SOURCE_REPO" --state open --limit 100 --json number,title,body,author,createdAt 2>/dev/null || echo "[]")
+            # Limit to the 2 most recent open issues for testing
+            CLIENT_ISSUES=$(gh issue list --repo "$SOURCE_REPO" --state open --limit 2 --json number,title,body,author,createdAt,labels,state 2>/dev/null || echo "[]")
 
             if [ -z "$CLIENT_ISSUES" ] || [ "$CLIENT_ISSUES" = "[]" ]; then
-              echo "No open issues found in $SOURCE_REPO."
+              echo "No issues found in $SOURCE_REPO."
               continue
             fi
 
@@ -43,12 +41,18 @@ jobs:
               CLIENT_TITLE=$(echo "$issue" | jq -r '.title')
               CLIENT_AUTHOR=$(echo "$issue" | jq -r '.author.login // "Unknown"')
               CLIENT_CREATED=$(echo "$issue" | jq -r '.createdAt // empty')
+              CLIENT_STATE=$(echo "$issue" | jq -r '.state // "OPEN"')
+
+              # Extract all labels as comma-separated values (e.g. "Android, iOS")
+              CLIENT_LABELS=$(echo "$issue" | jq -r '[.labels[].name] | join(", ")')
+              if [ -z "$CLIENT_LABELS" ]; then
+                CLIENT_LABELS="None"
+              fi
 
               if [ -z "$CLIENT_CREATED" ]; then
                 CLIENT_CREATED=$(echo "$issue" | jq -r '.created_at // "Unknown"')
               fi
 
-              # Composite deduplication tag distinguishing same issue numbers across different repos
               DEDUP_TAG="OrigRepo: ${REPO_NAME} | OrigNumber: ${CLIENT_NUM}"
 
               if echo "$EXISTING_BODIES" | grep -Fq "$DEDUP_TAG"; then
@@ -62,13 +66,15 @@ jobs:
                 echo "OrigNumber: ${CLIENT_NUM}" >> /tmp/issue_meta.txt
                 echo "OrigAuthor: ${CLIENT_AUTHOR}" >> /tmp/issue_meta.txt
                 echo "OrigCreatedAt: ${CLIENT_CREATED}" >> /tmp/issue_meta.txt
+                echo "OrigLabels: ${CLIENT_LABELS}" >> /tmp/issue_meta.txt
+                echo "OrigState: ${CLIENT_STATE}" >> /tmp/issue_meta.txt
                 echo "---END_CLIENT_META---" >> /tmp/issue_meta.txt
                 echo "" >> /tmp/issue_meta.txt
 
-                # Append raw issue description
+                # Append issue body
                 echo "$issue" | jq -r '.body // "No description provided."' >> /tmp/issue_meta.txt
 
-                # Create the mirrored issue with a clean title in your personal repo
+                # Create issue in personal repository
                 gh issue create \
                   --repo "$TARGET_REPO" \
                   --title "$CLIENT_TITLE" \
