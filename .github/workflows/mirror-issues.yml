@@ -83,4 +83,3 @@ jobs:
                 rm -f /tmp/issue_meta.txt
               fi
             done
-          done
