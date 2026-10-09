@@ -1,11 +1,9 @@
-name: Mirror Issues from Client Repo 
+name: Mirror Issues from Client Repo
 
 on:
-  schedule:
-    - cron:  '41 17 * * *'
   workflow_dispatch:
 
-# Prevent overlapping runs of this workflow in the same repository.
+# Prevent overlapping runs in the same repository.
 concurrency:
   group: mirror-client-issues-${{ github.repository }}
   cancel-in-progress: false
@@ -13,11 +11,13 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+
     steps:
       - name: Fetch and Mirror Issues
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           TARGET_REPO: ${{ github.repository }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -27,8 +27,7 @@ jobs:
             "Snapporg/wheelhouse-mobile"
           )
 
-          # Fetch ALL existing issues, including closed issues.
-          # Pagination prevents missing older mirrored issues.
+          # Fetch all existing target issues, including closed issues.
           EXISTING_ISSUES=$(gh api --paginate \
             "repos/${TARGET_REPO}/issues?state=all&per_page=100" |
             jq -s 'add | map(
@@ -39,14 +38,24 @@ jobs:
           for SOURCE_REPO in "${CLIENT_REPOS[@]}"; do
             echo "Scanning $SOURCE_REPO..."
 
-            CLIENT_ISSUES=$(gh issue list \
-              --repo "$SOURCE_REPO" \
-              --state open \
-              --limit 2 \
-              --json number,title,body,author,createdAt,labels,state)
+            # Fetch all open issues, excluding pull requests.
+            CLIENT_ISSUES=$(gh api --paginate \
+              "repos/${SOURCE_REPO}/issues?state=open&per_page=100" |
+              jq -s 'add | map(
+                select(has("pull_request") | not) |
+                {
+                  number,
+                  title,
+                  body,
+                  author: {login: (.user.login // "Unknown")},
+                  createdAt: .created_at,
+                  labels,
+                  state: (.state | ascii_upcase)
+                }
+              )')
 
             if [ -z "$CLIENT_ISSUES" ] || [ "$CLIENT_ISSUES" = "[]" ]; then
-              echo "No issues found in $SOURCE_REPO."
+              echo "No open issues found in $SOURCE_REPO."
               continue
             fi
 
@@ -72,8 +81,7 @@ jobs:
 
               DEDUP_TOKEN="DEDUP_${REPO_NAME}_${CLIENT_NUM}"
 
-              # Detect both new markers and legacy metadata.
-              # Exact line matching avoids matching another issue number.
+              # Detect current markers and legacy metadata.
               MATCH_COUNT=$(echo "$EXISTING_ISSUES" |
                 jq --arg token "$DEDUP_TOKEN" \
                    --arg repo "$REPO_NAME" \
@@ -126,8 +134,7 @@ jobs:
                 --title "$CLIENT_TITLE" \
                 --body-file "$TEMP_FILE"; then
 
-                # Update the local list immediately after successful creation.
-                # This also prevents duplicate processing within this run.
+                # Prevent duplicate processing within this run.
                 EXISTING_ISSUES=$(echo "$EXISTING_ISSUES" |
                   jq --arg body "$(cat "$TEMP_FILE")" \
                     '. + [{"number": null, "title": null, "body": $body}]')
