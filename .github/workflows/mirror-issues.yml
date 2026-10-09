@@ -2,7 +2,6 @@ name: Mirror Issues from Client Repo
 
 on:
   schedule:
-    # Runs every 10 minutes at off-peak minute marks to avoid GitHub queue congestion
     - cron: '7,17,27,37,47,57 * * * *'
   workflow_dispatch:
 
@@ -15,20 +14,31 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           TARGET_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
+
           CLIENT_REPOS=(
             "Snapporg/frontend"
             "Snapporg/mobile-app"
             "Snapporg/wheelhouse-mobile"
           )
 
-          # Fetch all existing issue bodies to prevent duplicates
-          EXISTING_BODIES=$(gh issue list --repo "$TARGET_REPO" --state all --limit 500 --json body --jq '.[].body' 2>/dev/null || true)
+          # Fetch existing issues from the target repository.
+          # Check issue bodies directly instead of relying on search indexing.
+          EXISTING_BODIES=$(gh issue list \
+            --repo "$TARGET_REPO" \
+            --state all \
+            --limit 1000 \
+            --json body \
+            --jq '.[].body')
 
           for SOURCE_REPO in "${CLIENT_REPOS[@]}"; do
             echo "Scanning $SOURCE_REPO..."
 
-            # Limit to 2 most recent open issues for testing (switch to 100 for production)
-            CLIENT_ISSUES=$(gh issue list --repo "$SOURCE_REPO" --state open --limit 2 --json number,title,body,author,createdAt,labels,state 2>/dev/null || echo "[]")
+            CLIENT_ISSUES=$(gh issue list \
+              --repo "$SOURCE_REPO" \
+              --state open \
+              --limit 2 \
+              --json number,title,body,author,createdAt,labels,state)
 
             if [ -z "$CLIENT_ISSUES" ] || [ "$CLIENT_ISSUES" = "[]" ]; then
               echo "No issues found in $SOURCE_REPO."
@@ -37,11 +47,15 @@ jobs:
 
             REPO_NAME=$(basename "$SOURCE_REPO")
 
-            echo "$CLIENT_ISSUES" | jq -c '.[]' | while read -r issue; do
+            readarray -t ISSUES_ARRAY < <(
+              echo "$CLIENT_ISSUES" | jq -c '.[]'
+            )
+
+            for issue in "${ISSUES_ARRAY[@]}"; do
               CLIENT_NUM=$(echo "$issue" | jq -r '.number')
               CLIENT_TITLE=$(echo "$issue" | jq -r '.title')
               CLIENT_AUTHOR=$(echo "$issue" | jq -r '.author.login // "Unknown"')
-              CLIENT_CREATED=$(echo "$issue" | jq -r '.createdAt // empty')
+              CLIENT_CREATED=$(echo "$issue" | jq -r '.createdAt // "Unknown"')
               CLIENT_STATE=$(echo "$issue" | jq -r '.state // "OPEN"')
 
               CLIENT_LABELS=$(echo "$issue" | jq -r '[.labels[].name] | join(", ")')
@@ -49,43 +63,50 @@ jobs:
                 CLIENT_LABELS="None"
               fi
 
-              if [ -z "$CLIENT_CREATED" ]; then
-                CLIENT_CREATED=$(echo "$issue" | jq -r '.created_at // "Unknown"')
+              # Stable unique marker for each source issue.
+              DEDUP_TOKEN="DEDUP_${REPO_NAME}_${CLIENT_NUM}"
+
+              # Match the complete marker line in existing issue bodies.
+              if printf '%s\n' "$EXISTING_BODIES" |
+                grep -Fqx "Token: ${DEDUP_TOKEN}"; then
+                echo "Issue [$REPO_NAME #$CLIENT_NUM] is already mirrored. Skipping."
+                continue
               fi
 
-              # Single-line dedup key matches exactly what is written into the body
-              DEDUP_TAG="DEDUP_KEY: [${REPO_NAME}#${CLIENT_NUM}]"
+              echo "Mirroring [$REPO_NAME #$CLIENT_NUM]: $CLIENT_TITLE"
 
-              if echo "$EXISTING_BODIES" | grep -Fq "$DEDUP_TAG"; then
-                echo "Issue [$REPO_NAME #$CLIENT_NUM] already mirrored. Skipping."
+              TEMP_FILE=$(mktemp)
+
+              cat <<EOF > "$TEMP_FILE"
+          ---CLIENT_META---
+          Token: ${DEDUP_TOKEN}
+          OrigRepo: ${REPO_NAME}
+          OrigNumber: ${CLIENT_NUM}
+          OrigAuthor: ${CLIENT_AUTHOR}
+          OrigCreatedAt: ${CLIENT_CREATED}
+          OrigLabels: ${CLIENT_LABELS}
+          OrigState: ${CLIENT_STATE}
+          ---END_CLIENT_META---
+
+          EOF
+
+              echo "$issue" |
+                jq -r '.body // "No description provided."' >> "$TEMP_FILE"
+
+              # Add the marker to the in-memory list only after successful creation.
+              if gh issue create \
+                --repo "$TARGET_REPO" \
+                --title "$CLIENT_TITLE" \
+                --body-file "$TEMP_FILE"; then
+
+                EXISTING_BODIES="${EXISTING_BODIES}"$'\n'"Token: ${DEDUP_TOKEN}"
+                echo "Successfully mirrored [$REPO_NAME #$CLIENT_NUM]."
               else
-                echo "Mirroring [$REPO_NAME #$CLIENT_NUM]: $CLIENT_TITLE"
-
-                # Write metadata cleanly including the exact DEDUP_TAG
-                echo "---CLIENT_META---" > /tmp/issue_meta.txt
-                echo "${DEDUP_TAG}" >> /tmp/issue_meta.txt
-                echo "OrigRepo: ${REPO_NAME}" >> /tmp/issue_meta.txt
-                echo "OrigNumber: ${CLIENT_NUM}" >> /tmp/issue_meta.txt
-                echo "OrigAuthor: ${CLIENT_AUTHOR}" >> /tmp/issue_meta.txt
-                echo "OrigCreatedAt: ${CLIENT_CREATED}" >> /tmp/issue_meta.txt
-                echo "OrigLabels: ${CLIENT_LABELS}" >> /tmp/issue_meta.txt
-                echo "OrigState: ${CLIENT_STATE}" >> /tmp/issue_meta.txt
-                echo "---END_CLIENT_META---" >> /tmp/issue_meta.txt
-                echo "" >> /tmp/issue_meta.txt
-
-                # Append issue body
-                echo "$issue" | jq -r '.body // "No description provided."' >> /tmp/issue_meta.txt
-
-                # Create issue in personal repository
-                gh issue create \
-                  --repo "$TARGET_REPO" \
-                  --title "$CLIENT_TITLE" \
-                  --body-file /tmp/issue_meta.txt
-
-                # Update local memory cache immediately for this run
-                EXISTING_BODIES="${EXISTING_BODIES} ${DEDUP_TAG}"
-
-                rm -f /tmp/issue_meta.txt
+                echo "ERROR: Failed to mirror [$REPO_NAME #$CLIENT_NUM]." >&2
+                rm -f "$TEMP_FILE"
+                exit 1
               fi
+
+              rm -f "$TEMP_FILE"
             done
           done
